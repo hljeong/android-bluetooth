@@ -12,7 +12,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.icu.util.Output
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -32,7 +31,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
@@ -86,27 +84,11 @@ const val MESSAGE_WRITE: Int = 1
 class MainActivity : ComponentActivity() {
 
     private val bluetoothAdapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
-    private val bluetoothIOHandler: Handler = Handler(mainLooper) {
-        when (it.what) {
-            MESSAGE_READ -> {
-                val data = it.obj as ByteArray
-                dialog("Read $data")
-                true
-            }
-
-            MESSAGE_WRITE -> {
-                true
-            }
-
-            else -> {
-                false
-            }
-        }
-    }
+    private lateinit var bluetoothIOHandler: Handler
     
     // https://stackoverflow.com/a/67582633
     // [A] is shortened to below with a utility builder function
-    private val enableBtWithPermission = buildActivity(
+    private val enableBluetooth = buildActivity(
         activity = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE),
         contract = ActivityResultContracts.StartActivityForResult(),
     ) {
@@ -116,32 +98,14 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    // https://developer.android.com/training/permissions/requesting
-    // [B] is shortened to below with a utility builder function
-    private val requestPermissionAndEnableBt = buildActivity(
-        activity = Manifest.permission.BLUETOOTH_CONNECT,
-        contract = ActivityResultContracts.RequestPermission(),
-    ) {
-        if (it) enableBtWithPermission()
-        else toast("Bluetooth connect permission request failed")
-    }
-
-    private val requestPermissionToScan = buildActivity(
-        activity = Manifest.permission.BLUETOOTH_SCAN,
-        contract = ActivityResultContracts.RequestPermission(),
-    ) {}
-
-    private val requestPermissionToAccessCoarseLocation = buildActivity(
-        activity = Manifest.permission.ACCESS_COARSE_LOCATION,
-        contract = ActivityResultContracts.RequestPermission(),
-    ) {}
-
-    private val requestPermissionToAccessFineLocation = buildActivity(
-        activity = Manifest.permission.ACCESS_FINE_LOCATION,
-        contract = ActivityResultContracts.RequestPermission(),
-    ) {}
-
     private val viewModel: BluetoothScreenViewModel = BluetoothScreenViewModel()
+
+    private val permissionsRequired = arrayOf(
+        Manifest.permission.BLUETOOTH_CONNECT,
+        Manifest.permission.BLUETOOTH_SCAN,
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+        Manifest.permission.ACCESS_FINE_LOCATION,
+    )
 
     @SuppressLint("MissingPermission")
     private val broadcastReceiver: BroadcastReceiver = object : BroadcastReceiver() {
@@ -169,6 +133,28 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        requestPermissions(permissionsRequired) {
+            // listen()
+        }
+
+        bluetoothIOHandler = Handler(mainLooper) {
+            when (it.what) {
+                MESSAGE_READ -> {
+                    val data = it.obj as ByteArray
+                    toast("got data")
+                    true
+                }
+
+                MESSAGE_WRITE -> {
+                    true
+                }
+
+                else -> {
+                    false
+                }
+            }
+        }
 
         val filter = IntentFilter().apply {
             addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
@@ -201,14 +187,7 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("MissingPermission")
     private fun bluetoothOn() {
         if (!bluetoothAdapter?.isEnabled!!) {
-
-            checkPermissionAndDo(
-                permission = Manifest.permission.BLUETOOTH_CONNECT,
-                rationale = "Need bluetooth connect permissions",
-                action = enableBtWithPermission,
-                requestPermissionAndAction = requestPermissionAndEnableBt,
-            )
-
+            enableBluetooth()
         } else {
             toast("Bluetooth is already on")
         }
@@ -216,39 +195,14 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("MissingPermission")
     private fun discover() {
-        try {
-            checkPermissionAndDo(
-                permission = Manifest.permission.BLUETOOTH_SCAN,
-                rationale = "Need bluetooth scan permissions",
-                action = {},
-                requestPermissionAndAction = requestPermissionToScan,
-            )
+        if (bluetoothAdapter?.isDiscovering == true) {
+            bluetoothAdapter.cancelDiscovery()
 
-            checkPermissionAndDo(
-                permission = Manifest.permission.ACCESS_COARSE_LOCATION,
-                rationale = "Need location permissions for discovery",
-                action = {},
-                requestPermissionAndAction = requestPermissionToAccessCoarseLocation,
-            )
+        } else if (bluetoothAdapter?.isEnabled == true) {
+            bluetoothAdapter.startDiscovery()
 
-            checkPermissionAndDo(
-                permission = Manifest.permission.ACCESS_FINE_LOCATION,
-                rationale = "Need location permissions for discovery",
-                action = {},
-                requestPermissionAndAction = requestPermissionToAccessFineLocation,
-            )
-
-            if (bluetoothAdapter?.isDiscovering == true) {
-                bluetoothAdapter.cancelDiscovery()
-
-            } else if (bluetoothAdapter?.isEnabled == true) {
-                bluetoothAdapter.startDiscovery()
-
-            } else {
-                toast("Bluetooth is not on")
-            }
-        } catch (e: Exception) {
-            dialog(e.message!!)
+        } else {
+            toast("Bluetooth is not on")
         }
     }
 
@@ -286,6 +240,7 @@ class MainActivity : ComponentActivity() {
                         it.start()
 
                         // do stuff...
+                        runOnUiThread { dialog("connected") }
                     }
 
                     bluetoothServerSocket?.close()
@@ -411,13 +366,6 @@ class MainActivity : ComponentActivity() {
         ) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun needRationale(permission: String): Boolean {
-        return ActivityCompat.shouldShowRequestPermissionRationale(
-            this,
-            permission
-        )
-    }
-
     private fun <I, O> buildActivity(
         activity: I,
         contract: ActivityResultContract<I, O>,
@@ -427,18 +375,16 @@ class MainActivity : ComponentActivity() {
         return { launcher.launch(activity) }
     }
 
-    // https://developer.android.com/training/permissions/requesting
-    private fun checkPermissionAndDo(
-        permission: String,
-        rationale: String,
-        action: () -> Unit,
-        requestPermissionAndAction: () -> Unit,
+    private fun requestPermissions(
+        permissions: Array<String>,
+        then: () -> Unit,
     ) {
-        when {
-            havePermission(permission) -> action()
-            needRationale(permission)-> toast(rationale)
-            else -> requestPermissionAndAction()
+        if (permissions.all { havePermission(it) }) return
+
+        val launcher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            then()
         }
+        launcher.launch(permissions)
     }
 
     private fun toast(message: String) {
